@@ -1,0 +1,268 @@
+ClassifiedGEDI_DTW_fc.size().aside(print)
+ClassifiedGEDI_DTW_fc.aggregate_histogram(ClassifiedGEDI_DTW_fc.first().propertyNames().get(0)).aside(print)
+
+var Rectify = function(classifiedInput){
+var name = classifiedInput.first().propertyNames().get(0)
+var treeC = classifiedInput.filter(ee.Filter.eq(name,1))
+var agbd_tree = Data.filter(ee.Filter.gte('agbd',25000000))
+var tree = agbd_tree.filter(ee.Filter.gte('rh96',6000000))
+treeC = treeC.filterBounds(tree.geometry())
+var cropC = classifiedInput.filter(ee.Filter.eq(name,2))
+var agbd_crop = Data.filter(ee.Filter.lt('agbd',25000000))
+var crop = agbd_crop.filter(ee.Filter.lt('rh96',2500000))
+cropC = cropC.filterBounds(crop.geometry())
+var forestC = classifiedInput.filter(ee.Filter.eq(name,3))
+var agbd_forest = Data.filter(ee.Filter.gte('agbd',50000000))
+var forest = agbd_forest.filter(ee.Filter.gte('rh96',10000000))
+forestC = forestC.filterBounds(forest.geometry())
+var rectified = treeC.merge(cropC).merge(forestC)
+return rectified}
+
+
+var ClassifiedGEDI_DTW_fc = Rectify(ClassifiedGEDI_DTW_fc)
+
+
+ClassifiedGEDI_DTW_fc.size().aside(print)
+ClassifiedGEDI_DTW_fc.aggregate_histogram(ClassifiedGEDI_DTW_fc.first().propertyNames().get(1)).aside(print)
+
+
+var trainingSamples = ClassifiedGEDI_DTW_fc
+// ****************************************************************************************************************** //
+// ******* GEDI TW-DTW  -- Esmaeel Adrah
+//  ******* Adapted from https://github.com/wouellette/ee-dynamic-time-warping**** //
+// ****************************************************************************************************************** //
+
+
+// ****************************************************************************************************************** //
+var nd = image.select(['ndvi_p3','ndvi_p25','ndvi_median','ndvi_p75','ndvi_p97'])
+var VV = image.select(['VV_All_p3','VV_All_p25','VV_All_p50','VV_All_p75','VV_All_p97'])
+var VH = image.select(['VH_All_p3','VH_All_p25','VH_All_p50','VH_All_p75','VH_All_p97'])
+var Imagedoy = ee.Image(3).rename('doy').addBands(ee.Image(25).rename('doy_25')).addBands(ee.Image(50).rename('doy_50'))
+.addBands(ee.Image(75).rename('doy_75')).addBands(ee.Image(97).rename('doy_97'))
+var ImFinal = nd.addBands(VV).addBands(VH).addBands(Imagedoy)
+
+var Imagelist = ee.List([])
+
+var constructInput = function(Data,band,pp3,pp25,pp50,pp75,pp97,scale){
+  
+
+var   im3 =  Data.select([band+pp3],[band]).set({'doy': 3})
+var   im25 = Data.select([band+pp25],[band]).set({'doy': 25})
+var   im50 = Data.select([band+pp50],[band]).set({'doy': 50})
+var   im75 = Data.select([band+pp75],[band]).set({'doy': 75})
+var   im97 = Data.select([band+pp97],[band]).set({'doy': 97})
+  
+  return [im3,im25,im50,im75,im97]
+}
+
+
+ var ndvi = constructInput(nd,'ndvi','_p3','_p25','_median','_p75','_p97',1)
+ var VV = constructInput(VV,'VV_All','_p3','_p25','_p50','_p75','_p97',1)
+ var VH = constructInput(VH,'VH_All','_p3','_p25','_p50','_p75','_p97',1)
+
+print(VV[1])
+var listIm = function(imN){
+var imm = ndvi[imN].addBands(VV[imN]).addBands(VH[imN])
+return imm}
+Imagelist = Imagelist.add(listIm(0)).add(listIm(1)).add(listIm(2)).add(listIm(3)).add(listIm(4))
+
+var imCol = ee.ImageCollection.fromImages(Imagelist)
+
+
+
+
+var names = ImFinal.bandNames()
+names.aside(print)
+
+
+var ImFinal = ImFinal.select(names)
+// var ImFinal = ImFinal.reproject({crs:'EPSG:2154', scale: 45})
+
+// ****************************************************************************************************************** //
+
+// Input data parameters
+
+var TIMESERIES_LEN = 5; // Number of timestamps in the time series
+var PATTERNS_LEN = 5// Number of timestamps for the reference data points
+var CLASS_NO = 3; // Number of classes to map. Those are
+var BAND_NO = 3
+// DTW time parameters
+var BETA = 50; // Beta parameter for the Time-Weighted DTW, controlling the tolerance (in days) of the weighting.
+var ALPHA = 0.1; // ALPHA parameter for the Time-Weighted DTW, controlling steepness of the logistic distribution
+
+
+
+
+
+// ****************************************************************************************************************** //
+
+print(imCol,'imCol')
+print(ImFinal,'final')
+
+// Map.addLayer(imCol,{},'col')
+
+
+Map.addLayer(ImFinal,{},'final',false)
+
+
+// Import external dependencies
+var palettes = require('users/gena/packages:palettes');
+
+// Import the Dynamic Time Warping script
+var DTW = require('users/soilwatch/functions:dtw.js');
+
+
+
+ var reference_signatures = ImFinal
+ .sampleRegions(  {collection: trainingSamples.map(function(l){return l.centroid()}),
+                   properties: ['ClassDTW'],
+                   scale : 45,
+                   geometries: true});
+                   
+
+print(reference_signatures)
+// var trainingSamples = trainingSamples.filterBounds(geometry4)
+print(trainingSamples)
+// ****************************************************************************************************************** //
+
+var DTWClassification = function(reference_signatures){
+  
+
+var dtw_min_dist = function(key, val){
+    key = ee.Number.parse(key);
+    // Function to format the signatures to a DTW-ready EE array
+var training_data_list = DTW.prepareSignatures(reference_signatures,
+                                                   'ClassDTW',
+                                                   key, //key
+                                                   BAND_NO, //BAND_NO
+                                                   PATTERNS_LEN, //PATTERNS_LEN
+                                                   names);
+
+    // Compute the class-wise DTW distance
+    return ee.ImageCollection(DTW.DTWDist(training_data_list,
+                                          imCol,
+                                          {patterns_no: val,
+                                          band_no: BAND_NO,
+                                          timeseries_len: TIMESERIES_LEN, //TIMESERIES_LEN
+                                          patterns_len: PATTERNS_LEN,  //PATTERNS_LEN
+                                          constraint_type: 'time-weighted',
+                                          beta: BETA,
+                                          alpha: ALPHA
+                                          })
+           ).min()
+           .rename('dtw')
+           // Add class band corresponding to the land cover/crop class computed.
+           // This is useful/necessary to generate the hard classification map from the dissimilarity values
+           .addBands(ee.Image(key).toByte().rename('band'));
+  };
+  
+  
+var dtw_image_list = reference_signatures_agg.map(dtw_min_dist);
+
+
+ var array = ee.ImageCollection(dtw_image_list.values()).toArray();
+
+  // Sort array by the first band, keeping other bands
+  var axes = {image:0, band:1};
+  var sort = array.arraySlice(axes.band, 0, 1);  // select bands from index 0 to 1 (DTW dissimilarity score)
+  var sorted = array.arraySort(sort);
+
+  // Take the first image only
+  var values = sorted.arraySlice(axes.image, 0, 1);
+
+  // Convert back to an image
+  var min = values.arrayProject([axes.band]).arrayFlatten([['dtw', 'band']]);
+
+  // Extract the DTW dissimilarity score
+  var dtw_score = min.select(0).rename('score_');
+  // Extract the DTW hard classification
+  var dtw_class = min.select(1).rename('classification_');
+
+  // 1. DTW outputs (dissimilarity score + classification map), 2. reference signatures, 3. stack of bands used as input to DTW
+  return [dtw_class.addBands(dtw_score), reference_signatures];
+};
+
+// ****************************************************************************************************************** //
+
+
+var signatures = trainingSamples.select('ClassDTW')
+
+
+// Create a dictionary mapping land cover class to number of reference signatures per sample
+ 
+var reference_signatures_agg = signatures.aggregate_histogram('ClassDTW');
+
+print('Number of reference signatures per land cover class:')
+print(reference_signatures_agg);
+
+// Class list
+var classification_names = ['TreeCrops',
+                            'OtherCrops',
+                            'WoodyVEg',
+                            'bare'
+                            ];
+
+
+
+
+var score_palette = palettes.colorbrewer.RdYlGn[9].reverse();
+
+var dtw_outputs = DTWClassification(reference_signatures);
+var dtw = dtw_outputs[0]; // Extract the DTW dissimilarity score and hard classification
+
+
+var reference_signatures = dtw_outputs[1]; // Extract the reference signatures for 2020.
+var stack = dtw_outputs[2]; // Extract the bands stack used as input for DTW.
+var list = ee.List([stack]); // Convert input bands to list to enable appending data from other years
+
+
+// ****************************************************************************************************************** //
+
+var classif = dtw.select('classification_')
+
+ var classified= classif//.updateMask(VegMask)
+
+
+
+
+Export.image.toAsset(
+  {
+  image: classified,region: region, description: 'France_3_Wall_DTW_DTW_rectified', 
+  assetId: 'projects/ee-hyinhe/assets/Esmaeel/LessIsMore_GEDI_TreeCrops/Outputs/France_3_Wall_DTW_DTW_rectified',
+  scale:10, crs: 'EPSG:2154', maxPixels : 1e13})
+
+
+
+
+// use the exported classified for deriving statsitc to avoid memoery error
+
+
+Map.addLayer(classified,{min: 1, max: 3, palette:[ '7f5217','#e5c520','#428717']},'Classified_DTW')
+
+
+var validation = classified.sampleRegions({
+   collection: validationD,
+properties: ['Truth'],
+   scale: 10
+ });
+
+
+// //Compare vaidation(Truth) and  the classification result
+
+var ErrorMatix = validation.errorMatrix('Truth', 'classification_');
+
+
+//Print the error matrix to the console
+print('Error matrix: ', ErrorMatix);
+
+// //get and print the accuracy statistics: the overall accuracy and fscore
+ var OverAllAccuracy = ErrorMatix.accuracy();
+print('Overall Accuracy: ', OverAllAccuracy);
+
+ var fscore = ErrorMatix.fscore();
+print('Validation fscore', fscore);
+
+
+
+
+//######################################################
