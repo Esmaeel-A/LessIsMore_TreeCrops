@@ -1,0 +1,256 @@
+
+//######################################################################################
+//#### Kent State University - SenslandLab - 2023 ####
+//### Esmaeel Adrah eadrah@kent.edu ###
+//######################################################################################
+
+
+// Import AllGEDIdata from step 1 'GEDIFull_Syria2020'
+
+
+// 9-Filter for intersected shots and geolocation errors, apply minimum distance of 50 m between shots
+// 10-Filter to account for geolocation errors and homogeneity, do 10 m buffer and get only shots within unified ESA land cover after buffer
+
+
+// This code works for small region as a demonstration; where step 3 (outside earth engine is skipped)
+//To actually export for the entire region and get the output for step 3 processing, uncomment the second half
+// Where this code was broken into multiple steps 
+//steps include starting with workable mask image without bands to avoid memory usage and merge info later on
+// Also exporting the intermediate results as chunck and merging them at a later stage
+
+////##################################################################################################
+AllGEDIdata
+//Setting night shots and power beams filter 
+// var AllGEDIdata = AllGEDIdata.updateMask(AllGEDIdata.select('solar_elevation').lte(0))
+
+// var AllGEDIdata = AllGEDIdata.updateMask(AllGEDIdata.select('beam').gt(4000000))
+
+// // N mode filter
+// var AllGEDIdata = AllGEDIdata.updateMask(AllGEDIdata.select('num_detectedmodes').gt(0))
+
+
+var workableimage = AllGEDIdata.select('latitude').neq(0)
+
+// get circles from GEDI pixels
+var Circular45 = workableimage.sample(
+  {region: region,dropNulls : true,geometries: true, }).filter(ee.Filter.neq('latitude', null))
+                .map(function(f){return f.buffer(22.5)})
+
+
+
+// To make it work Export the location using workable image rather than ALLGEDI data
+Export.table.toAsset(
+   {
+      collection: Circular45,
+      description: 'Circular45_Syria2020',
+      assetId:'Esmaeel/GEDI/Circular45_Syria2020'
+     })
+////##################################################################################################
+//Remove the intersected shots after buffer
+var N_IntersectedFeature = function(FC, Distance){
+  var names = FC.first().propertyNames().add('count')
+  var CopyFC = FC
+  var distFilter = ee.Filter.withinDistance({
+  distance: Distance,
+  leftField: '.geo',
+  rightField: '.geo',
+  maxError: 2
+})
+var distSaveAll = ee.Join.saveAll({
+  matchesKey: 'points',
+  measureKey: 'distance',
+})
+var spatialJoined = distSaveAll.apply(FC, CopyFC, distFilter)
+
+return spatialJoined.map(function(f) { var count = ee.List(f.get('points')).size()
+return f.set('count', count)}).select(names).filter(ee.Filter.eq('count',1))}
+// Apply additional buffer of 2.5 to make the minimum distance between two center 50m 
+var Circular45 = N_IntersectedFeature(Circular45, 2.5)
+
+
+// Check the initialMap to filter for only fully contained shots
+
+// Get landcover 2020 ESA/WorldCover/v100
+var initialMap = ee.ImageCollection("ESA/WorldCover/v100").first().clip(region);
+
+
+var Circular45 = initialMap.reduceRegions(
+  {collection: Circular45, reducer: ee.Reducer.stdDev().combine(ee.Reducer.mode().setOutputs(["Class2020"]), null, true), scale: 15}).filter(ee.Filter.eq('stdDev', 0))
+Map.addLayer(Circular45, {},'Circular45')
+
+
+////##################################################################################################
+
+
+
+Export.table.toAsset(
+   {
+      collection: Circular45,
+      description: 'Circular45_GEDI_Syria2020',
+     })
+
+
+////##################################################################################################
+// Workable code as sub-steps
+////##################################################################################################
+
+/*
+////Step 2.1 ##################################################################################
+// Apply additional filters and extract GEDI circular buffered locations (45 m in diameter)
+
+
+var workableimage = AllGEDIdata.select('latitude').neq(0)
+
+// get circles from GEDI pixels
+var Circular45 = workableimage.sample(
+  {region: region,dropNulls : true,geometries: true, }).filter(ee.Filter.neq('latitude', null))
+                .map(function(f){return f.buffer(22.5)})
+
+
+
+// To make it work Export the location using workable image rather than ALLGEDI data
+Export.table.toAsset(
+   {
+      collection: Circular45,
+      description: 'Circular45_Locations_Syria2020',
+      assetId:'Esmaeel/Intermediate'
+     })
+
+////Step 2.2 ##################################################################################
+// Import the GEDI circular buffered locations from step 2.1 and import initial LC
+
+
+
+////Step 2.2 ##################################################################################
+// Apply double spatial filter 1- to remove interesected shots and shots within 50m from each other
+// 2- to include only fully contained shots withing one class based on initial LC
+// The code break down the data into chuncks to manage the process in parallel (4 in this case)
+// To run the code choose a process and comment the rest
+// Install the plug-in gee chrome extension to leverage running mutliple tasks
+// the out put of the code is a list of chuncks in the asset 
+
+var subsetsize = 24000;
+var totalsize = 953555 // 
+var portion = 240000  // rounded 1380585 / 4 
+
+
+var subsetsizeFrance = 22000;
+var totalsizeFrance = 436511 // 
+var portionFrance = 110000  // rounded 436511 / 4 
+
+////##################################################################################################
+
+//process 1
+//var UpperLimit = portion //portion*1
+//var i_start = 0
+//var UpperLimitFrance = portionFrance //portion*1
+//var i_startFrance = 0
+
+////process 2 
+var UpperLimit = portion*2 //portion*2
+var i_start = portion
+var UpperLimitFrance = portionFrance*2 //portion*2
+var i_startFrance = portionFrance
+////process 3
+//var UpperLimit = portion*3//portion*3
+//var i_start = portion*2
+//var UpperLimitFrance = portionFrance*3//portion*3
+//var i_startFrance = portionFrance*2
+////process 4 
+//var UpperLimit = portion*4
+//var i_start = portion*3
+//var UpperLimitFrance = portionFrance*4
+//var i_startFrance = portionFrance*3
+////##################################################################################################
+
+var ApplyToParts = function(Part, splitId, Country, InitialMap,ssize){ 
+
+//spatial double filter
+var N_IntersectedFeature = function(FC, Distance){
+  var names = FC.first().propertyNames().add('count')
+  var CopyFC = FC
+  var distFilter = ee.Filter.withinDistance({
+  distance: Distance,
+  leftField: '.geo',
+  rightField: '.geo',
+  maxError: 2
+})
+var distSaveAll = ee.Join.saveAll({
+  matchesKey: 'points',
+  measureKey: 'distance',
+})
+var spatialJoined = distSaveAll.apply(FC, CopyFC, distFilter)
+
+return spatialJoined.map(function(f) { var count = ee.List(f.get('points')).size()
+return f.set('count', count)}).select(names).filter(ee.Filter.eq('count',1))}
+var Circular45 = InitialMap.reduceRegions(
+  {collection: N_IntersectedFeature(Part, 2.5), reducer: ee.Reducer.stdDev().combine(ee.Reducer.mode().setOutputs(["Class2020"]), null, true), scale: 15}).filter(ee.Filter.eq('stdDev', 0))
+
+// keep relevant properties and remove false latitude
+ var finalNames = Circular45.first().propertyNames().remove('count').remove('stdDev')
+  Circular45 = Circular45.map(function(f) {return f.select(finalNames)})
+  
+
+var t_shots = i+ssize
+print('FC ' +splitId+ ' Ready to export, total scanned shots '+t_shots)
+Map.addLayer(Circular45,{}, 'FC ' +splitId,false)
+
+Export.table.toAsset(
+   {
+      collection: Circular45,
+      description: 'Circular45_filtered_'+Country+'2020_'+splitId,
+      assetId:'Esmaeel/GEDI/Circular45_sarGEDI_'+Country+'2020/Circular45_filtered_'+Country+'2020_'+splitId
+     })
+return Circular45
+}
+////##################################################################################################
+
+// Apply to Syria
+
+  for (var i = i_start; i<UpperLimit ; i=i+subsetsize){
+  var subset = ee.FeatureCollection(C45Syria.toList(subsetsize, i));
+  ApplyToParts(subset, i/subsetsize, 'Syria', initialMap_Syria,subsetsize)
+}
+
+////##################################################################################################
+// Repeating same code for france
+
+  for (var i = i_startFrance; i<UpperLimitFrance ; i=i+subsetsizeFrance){
+  var subset = ee.FeatureCollection(C45France.toList(subsetsizeFrance, i));
+  ApplyToParts(subset, i/subsetsizeFrance, 'France', initialMap_France,subsetsizeFrance)
+}
+
+
+////##################################################################################################
+
+////Step 2.3 ##################################################################################
+// The code import the list of chuncks of spatially filtered GEDI form step 2.2
+// the output is the merged feature collection that is spatially filtered for the entire region
+
+
+////Step 2.3 #########################################################################################
+// insert the asset path where the list of the chunks where exported
+
+
+var assetList = ee.data.listAssets("projects/ee-hyinhe/assets/Esmaeel/GEDI/Circular45_sarGEDI_Syria2020")['assets']
+var feature = assetList[0].id
+print(feature)
+//print(feature.get('id'))
+ 
+
+var mergedCollection = ee.FeatureCollection([]);
+
+for (var i = 0; i < assetList.length; i++) {
+ var featureCollection = ee.FeatureCollection(assetList[i].id);
+  mergedCollection = mergedCollection.merge(featureCollection);
+}
+
+print('Merged Collection Size:', mergedCollection.size());
+
+Export.table.toAsset({
+  collection: mergedCollection,
+  description: 'Circular45_filtered_Syria2020',
+  assetId: 'projects/ee-hyinhe/assets/Esmaeel/intermediate/Circular45_filtered_Syria2020'
+});
+
+*/
