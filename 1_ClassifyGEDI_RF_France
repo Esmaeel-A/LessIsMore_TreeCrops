@@ -1,0 +1,210 @@
+// ****************************************************************************************************************** //
+
+// ****************************************************************************************************************** //
+
+trainingSamples.aggregate_histogram('Truth').aside(print, "trainingSamples")
+
+
+
+validationSamples.aggregate_histogram('Truth').aside(print, "validationSamples")
+
+
+
+var properties = [
+'VH_All_p3',
+'VH_All_p25',
+'VH_All_p50',
+'VH_All_p75',
+'VH_All_p97',
+'VV_All_p3',
+'VV_All_p25',
+'VV_All_p50',
+'VV_All_p75',
+'VV_All_p97',
+ 'ndvi_p3',
+  'ndvi_p25',
+ 'ndvi_p75',
+ 'ndvi_p97',
+
+ 'ndvi_median',
+  "rh4","rh8", 
+    "rh12",  "rh16", 
+  "rh24","rh28",
+    "rh32", "rh36", 
+  "rh44",  "rh48",  "rh52",  "rh56",  "rh64","rh68",  "rh72",  "rh76",
+    "rh84",  "rh88",
+  "rh92","rh96", 
+   "rh20", "rh40", "rh60", "rh80", "rh100",
+          'agbd',  "agbd_pi_lower", "agbd_pi_upper"
+
+]
+Data = Data.select(properties)
+
+// ****************************************************************************************************************** //
+
+var classifier = ee.Classifier.smileRandomForest(100, null, 1, 0.5, null, 19)
+.train({
+  features: trainingSamples,
+  classProperty: 'Truth',
+  inputProperties: properties
+})
+
+
+//run the classification
+var classified = Data.classify(classifier, "classification").select("classification");
+
+Export.table.toAsset(classified, 'France_1_ClassifiedGEDI_RF','projects/ee-hyinhe/assets/Esmaeel/LessIsMore_GEDI_TreeCrops/Outputs/France_1_ClassifiedGEDI_RF')
+  
+
+var image = classified.reduceToImage(["classification"], ee.Reducer.first().setOutputs(["classification"]))
+
+
+
+
+var validation = image.sampleRegions({
+   collection: validationSamples,
+properties: ['Truth'],
+   scale: 45
+ });
+
+
+print(validation,'validation')
+
+ 
+
+// Add the classified image to the map
+Map.addLayer(classified,
+{},//{min: 0, max: 4, palette:[ '1414FF','7F5217','green','white']},
+'classified');
+
+
+
+// //Compare vaidation(truth) and  the classification result
+
+var ErrorMatix = validation.errorMatrix('Truth', 'classification');
+
+
+//Print the error matrix to the console
+print('Error matrix: ', ErrorMatix);
+
+// //get and print the accuracy statistics: the overall accuracy and fscore
+ var OverAllAccuracy = ErrorMatix.accuracy();
+print('Overall Accuracy: ', OverAllAccuracy);
+
+ var fscore = ErrorMatix.fscore();
+print('Validation fscore', fscore);
+
+
+ // Get variable importance
+ var dict = classifier.explain();
+ print("Classifier information:", dict);
+ var variableImportance = ee.Feature(null, ee.Dictionary(dict).get('importance'));
+ // Make chart, print it
+ var chart =
+ ui.Chart.feature.byProperty(variableImportance)
+ .setChartType('ColumnChart')
+ .setOptions({
+ title: 'Random Forest Variable Importance',
+ legend: {position: 'none'},
+ hAxis: {title: 'Bands'},
+ vAxis: {title: 'Importance'}
+ });
+ print(chart);
+ 
+ 
+ 
+ 
+ 
+ //#############################################
+ 
+var externt = classified
+
+
+var classifierP = ee.Classifier.smileRandomForest(1000, null, 1, 0.5, null, 19)
+.train({
+  features: trainingSamples,
+  classProperty: 'Truth',
+  inputProperties: properties
+}).setOutputMode('MULTIPROBABILITY')
+
+
+//run the classification
+var classifiedP = Data.classify(classifierP, "classification").select("classification");
+
+Map.addLayer(classifiedP,{},'classified_probability')
+
+
+//function to get what inside the array to properties
+var as_properties = function(f){
+  var list = ee.Array(f.get('classification'))
+  var c1 = list.get([0])
+  var c2 = list.get([1])
+  var c3 = list.get([2])
+  
+  return f.set({c1: c1, c2:c2, c3:c3})
+}
+
+
+var fcc = classifiedP.map(as_properties)
+
+
+var t1 = fcc.filter(ee.Filter.gt('c1', 0.5)).map(function(f){return f.set({classs: 1})})
+var t2 = fcc.filter(ee.Filter.gt('c2', 0.5)).map(function(f){return f.set({classs: 2})})
+var t3 = fcc.filter(ee.Filter.gt('c3', 0.5)).map(function(f){return f.set({classs: 3})})
+var fcc = t1.merge(t2).merge(t3)
+print(fcc)
+
+
+
+
+
+Export.table.toAsset(fcc.select('classs'), 'France_1_ClassifiedGEDI_RFprobability','projects/ee-hyinhe/assets/Esmaeel/LessIsMore_GEDI_TreeCrops/Outputs/France_1_ClassifiedGEDI_RFprobability')
+  
+
+
+var image = fcc.reduceToImage(["classs"], ee.Reducer.first().setOutputs(["classification"]))
+
+var validation = image.sampleRegions({
+   collection: validationSamples,
+properties: ['Truth'],
+   scale: 45
+ });
+
+
+
+
+// //Compare vaidation(truth) and  the classification result
+
+var ErrorMatix = validation.errorMatrix('Truth', 'classification');
+
+
+//Print the error matrix to the console
+print('Error matrix: ', ErrorMatix);
+
+// //get and print the accuracy statistics: the overall accuracy and fscore
+ var OverAllAccuracy = ErrorMatix.accuracy();
+print('Overall Accuracy: ', OverAllAccuracy);
+
+ var fscore = ErrorMatix.fscore();
+print('Validation fscore', fscore);
+
+
+ // Get variable importance
+ var dict = classifier.explain();
+ print("Classifier information:", dict);
+ var variableImportance = ee.Feature(null, ee.Dictionary(dict).get('importance'));
+ // Make chart, print it
+ var chart =
+ ui.Chart.feature.byProperty(variableImportance)
+ .setChartType('ColumnChart')
+ .setOptions({
+ title: 'Random Forest Variable Importance',
+ legend: {position: 'none'},
+ hAxis: {title: 'Bands'},
+ vAxis: {title: 'Importance'}
+ });
+ print(chart);
+ 
+ 
+ 
+ 
