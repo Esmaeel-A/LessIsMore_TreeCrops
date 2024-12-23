@@ -1,0 +1,43 @@
+
+//######################################################################################
+//#### Kent State University - SenslandLab - 2023 ####
+//### Esmaeel Adrah eadrah@kent.edu ###
+//######################################################################################
+
+// THESE TWO steps are to load data to GEDI shots
+////Step 4 ##################################################################################
+// this step is to get ground truth data 
+// the purpose here is to prepare subset data for ground truthing (using very high resolution satellite images)
+// the step can be implementd inside or outside earth engine
+// it follow area2 https://area2.readthedocs.io/en/latest/overview.html
+// the subsetting considered the minority class number and aimed at something like 1000 shot per class
+
+////##################################################################################################
+
+////Step 5 ##################################################################################
+
+//load the S2 data and S1 data to GEDI shots to facilitate the work
+
+
+var Circular45_loaded = S2.addBands(S1).reduceRegions(
+  {
+  collection: Circular45_filtered, 
+   reducer: ee.Reducer.mean(),
+  scale: 10,
+  crs: 'EPSG:32637'})
+
+
+
+// Map.addLayer(Circular45_loaded,{},'SamplesWithSAR',false)
+
+
+////##################################################################################################
+
+
+
+Export.table.toAsset(
+   {
+      collection: Circular45_loaded,
+      description: 'Circular45_Loaded_Syria2020',
+     })
+
