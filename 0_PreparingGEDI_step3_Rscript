@@ -1,0 +1,322 @@
+
+//######################################################################################
+//#### Kent State University - SenslandLab - 2023 ####
+//### Esmaeel Adrah eadrah@kent.edu ###
+//######################################################################################
+
+
+////Step 3 ##################################################################################
+// This step take the output of step 2.4  (Circular45_GEDI_Syria2020_Nadjusted) 
+// or the output form truthing to make the calculation less demanding and process it outside earth engine
+// the step apply a spatial - time matching cloud filter using EUMESTAT MSG2-4 cloud product
+
+// the process is applied in R programming in local server
+// the output is the same dataset with a new column called MSGCLM that indicates the cloud status at the time of acquisition 
+// these are 0 >> clear over water | 1 clear over land | 2 cloud | 3 no data
+
+// there are two version of this code 
+// one for sequential processing (testing) and the other for parallel processing
+// Codes are in R and included here only for reference and archive
+////Step 3 #########################################################################################
+// sequential
+
+######################################################################################
+# Code to match GEDI Observations with EUMETSAT Cloud Mask Data
+#### Kent State University - SenslandLab ####
+### Esmaeel Adrah eadrah@kent.edu ###
+
+######################################################################################
+# Load libraries
+library(sf)    
+library(raster) 
+library(rgdal) 
+library(progress)
+
+
+
+# Load dataset 1 (cloud cover data) 
+folder_path <- "L:/Users/Adrah/MSG0Degree/CloudData"
+dataset1_files <- list.files(folder_path, pattern = ".grb", full.names = TRUE)
+
+
+# Load a tif raster to control and projection and extent of the grib files
+control_raster <- raster('L:/Users/Adrah/MSG0Degree/ref.tif')
+
+
+# Load dataset 2 (GEDI data) 
+file_path <- "L:/Users/Adrah/MSG0Degree/Circular45_GEDI_Syria2020_Nadjusted.csv"
+# if csv # if shp file  >>  dataset2 <- st_read(file_path)
+dataset2 <- read.csv(file_path)
+# subset to test dataset2 <- head(dataset2,20)
+#adjust the scale
+dataset2 <- dataset2[0:10000,]
+dataset2$latitude <- dataset2$latitude/1000000
+dataset2$longitude <- dataset2$longitude/1000000
+
+# Create an empty column to store the cloud status for each observations
+dataset2$MSGCLM <- NA
+
+# Extracting the cloud cover acquisition times from dataset 1 filenames
+dataset1_times <- as.POSIXct(substring(list.files(folder_path, pattern = ".grb"), 29, 42), format = "%Y%m%d%H%M%S")
+
+
+# create a progress bar to monitor the progress 
+pb <- progress_bar$new(
+  format = "[:bar] :percent Elapsed: :elapsed",
+  total = nrow(dataset2)
+)
+
+
+
+pre =1
+
+# Loop through each observation in dataset 2 to: 
+# a)get the acquisition time, b)match it with dataset 1, and c) extract cloud status 
+for (i in 1:nrow(dataset2)) {
+  
+  #a) 
+  # Get the acquisition time for the current GEDI observation
+  acquisition_time <- dataset2$delta_time[i]/1000000
+  # Change time format to match the format in dataset 1 , the origin is 01-01-2018 for GEDI data
+  acquisition_time_formatted <- format(as.POSIXct(acquisition_time, origin = "2018-01-01"))#, format = "%Y%m%d%H%M")
+  # Set acceptable time range within +/- 7.5 minutes to do the matching (which is 15 minutes /2) 
+  time_range <- as.POSIXct(c(acquisition_time - 450, acquisition_time + 450), origin = "2018-01-01")
+  #b)
+  # Filter dataset 1 times within the time range
+  matching_times <- dataset1_times[dataset1_times >= time_range[1] & dataset1_times <= time_range[2]]
+  # If there are multiple matches within the range, find the nearest matching time 
+  if (length(matching_times) > 0) {
+    # I'm checking the time difference with all matches and returning the minimum one's index
+    nearest_time <- matching_times[which.min(abs(as.POSIXct(acquisition_time_formatted) - matching_times))]
+    # Format the matching nearest time to the file name format in dataset 1 
+    nearest_time_formatted <- format(nearest_time, format = "%Y%m%d%H%M%S")
+    # Construct the filename of the match
+    # To address the missing data, if nearest time between t1 and t2, use MSG2, else use MSG4
+    T1 <- as.POSIXct("2020-01-13 16:30:00", tz = "UTC")
+    T2 <- as.POSIXct("2020-01-27 08:45:00", tz = "UTC")
+    if (nearest_time >= T1 && nearest_time <= T2) {
+      filename <- paste0(folder_path, "/MSG2-SEVI-MSGCLMK-0100-0100-", nearest_time_formatted, ".000000000Z-NA.grb")
+    } else {
+      filename <- paste0(folder_path, "/MSG4-SEVI-MSGCLMK-0100-0100-", nearest_time_formatted, ".000000000Z-NA.grb")
+    }
+    
+    # To increase efficiency check if the previous one is the same, 
+    # if so,  use the same raster rather than read it again
+    
+    if (filename == pre) {
+      
+      print(nearest_time)
+      print("sameRaster")
+      points_sp <- SpatialPoints(dataset2[i, c("longitude", "latitude")])
+      
+      # Extract the cloud status information for the current observation's location
+      CMA_status <- extract(MSGCLM_Adjusted, points_sp)
+      
+      dataset2$MSGCLM[i] <-CMA_status
+    } else {  
+      
+      
+      #c)
+      # Double Check that corresponding cloud cover file exists and load it to extract the cloud status
+      if (file.exists(filename)) {
+        # Load the cloud cover grb file from the corresponding file
+        MSGCLM <- raster(filename)
+        # Adjust the grb file extent to the correct extent based on the tif control raster
+        MSGCLM_Adjusted <- projectRaster(MSGCLM, control_raster) 
+        print(nearest_time)
+        print(filename)
+        pre = filename
+        # Extract the geometry of the current GEDI observation and draw it
+        # if shp
+        # observation_geometry <- st_geometry(dataset2[1, ])
+        # observation_points <- st_coordinates(observation_geometry)
+        # if csv
+        points_sp <- SpatialPoints(dataset2[i, c("longitude", "latitude")])
+        
+        # Extract the cloud status information for the current observation's location
+        CMA_status <- extract(MSGCLM_Adjusted, points_sp)
+        # add the cloud status as a created column to the GEDI data set
+        dataset2$MSGCLM[i] <- CMA_status
+        
+        
+      }}
+  }
+  # Update the progress bar
+  pb$tick()
+  
+}
+# Close the progress bar when done
+pb$close()
+
+
+# To avoid values is extracted from two raster cell, round up to cloudy pixel
+dataset2$MSGCLM <- round(dataset2$MSGCLM)
+
+
+# write the new files with the added column on the drive
+output_file <- "L:/Users/Adrah/MSG0Degree/LoadedGEDIpoints_Syria.csv"
+
+# Write the data frame to a new CSV file
+write.csv(dataset2, file = output_file, row.names = FALSE)
+
+
+# make a a quick statistics of the cloudy Vs clear observations and NAs
+barplot(table(dataset2$Class2020, dataset2$MSGCLM), beside = TRUE, col = c("red", "blue"),
+        legend = rownames(table(dataset2$Class2020, dataset2$MSGCLM)))
+count_cloudy <- sum(dataset2$MSGCLM == 2)
+cat("Number of Cloudy observations", count_cloudy)
+count_clear <- sum(dataset2$MSGCLM == 1)
+cat("Number of clear observations", count_clear)
+# For testing cloud raster
+# in case to test any tif
+#output_path <- "L:/Users/Adrah/MSG0Degree/CloudTestraster.tif"  
+# Export the raster
+#writeRaster(MSGCLM_Adjusted, filename = output_path, format = "GTiff")
+
+
+
+////Step 3 #########################################################################################
+// parallel
+######################################################################################
+# Code to match GEDI Observations with EUMETSAT Cloud Mask Data
+#### Kent State University - SenslandLab ####
+### Esmaeel Adrah eadrah@kent.edu ###
+
+######################################################################################
+# Load libraries
+library(sf)    
+library(raster) 
+library(rgdal) 
+library(parallel)
+library(progress)
+
+
+cl <- makeCluster(detectCores() - 4)
+clusterEvalQ(cl, {
+  library(sf)    
+  library(raster) 
+  library(rgdal) 
+ library(progress)
+ library(parallel)
+
+
+# Load dataset 1 (cloud cover data) 
+folder_path <- "C:/Users/eadrah/Desktop/MSG0Degree/CloudData"
+dataset1_files <- list.files(folder_path, pattern = ".grb", full.names = TRUE)
+
+
+
+
+# Load a tif raster to control and projection and extent of the grib files
+control_raster <- raster('C:/Users/eadrah/Desktop/MSG0Degree/ref.tif')
+
+
+# Load dataset 2 (GEDI data) 
+file_path <- "C:/Users/eadrah/Desktop/MSG0Degree/Circular45_France2020_truth.csv"
+# if csv # if shp file  >>  dataset2 <- st_read(file_path)
+dataset2 <- read.csv(file_path)
+#dataset2 <- head(dataset2,20)
+dataset2 <- dataset2[3001:3499,]
+
+
+dataset2$delta_time <-dataset2$delta_time/1000000
+dataset2$latitude <-dataset2$latitude/1000000
+dataset2$longitude <-dataset2$longitude/1000000
+# Create an empty column to store the cloud status for each observations
+dataset2$MSGCLM <- NA
+dataset2$MSGCLMr <- NA
+dataset2$match <- NA
+# Extracting the cloud cover acquisition times from dataset 1 filenames
+dataset1_times <- as.POSIXct(substring(list.files(folder_path, pattern = ".grb"), 29, 42), format = "%Y%m%d%H%M%S")
+
+
+# create a progress bar to monitor the progress 
+pb <- progress_bar$new(
+  format = "[:bar] :percent Elapsed: :elapsed",
+  total = nrow(dataset2)
+)
+
+# Loop through each observation in dataset 2 to: 
+for (i in 1:nrow(dataset2)) {
+  
+  #a) 
+  # Get the acquisition time for the current GEDI observation
+  acquisition_time <- dataset2$delta_time[i]
+  # Change time format to match the format in dataset 1 , the origin is 01-01-2018 for GEDI data
+  acquisition_time_formatted <- format(as.POSIXct(acquisition_time, origin = "2018-01-01"))#, format = "%Y%m%d%H%M")
+  # Set acceptable time range within +/- 7.5 minutes to do the matching (which is 15 minutes /2) 
+  time_range <- as.POSIXct(c(acquisition_time - 450, acquisition_time + 450), origin = "2018-01-01")
+  #b)
+  # Filter dataset 1 times within the time range
+  matching_times <- dataset1_times[dataset1_times >= time_range[1] & dataset1_times <= time_range[2]]
+  # If there are multiple matches within the range, find the nearest matching time 
+  if (length(matching_times) > 0) {
+    # I'm checking the time difference with all matches and returning the minimum one's index
+    nearest_time <- matching_times[which.min(abs(as.POSIXct(acquisition_time_formatted) - matching_times))]
+    # Format the matching nearest time to the file name format in dataset 1 
+    nearest_time_formatted <- format(nearest_time, format = "%Y%m%d%H%M%S")
+    # Construct the filename of the match
+    # To address the missing data, if nearest time between t1 and t2, use MSG2, else use MSG4
+    T1 <- as.POSIXct("2020-01-13 16:30:00", tz = "UTC")
+    T2 <- as.POSIXct("2020-01-27 08:45:00", tz = "UTC")
+    if (nearest_time >= T1 && nearest_time <= T2) {
+      filename <- paste0(folder_path, "/MSG2-SEVI-MSGCLMK-0100-0100-", nearest_time_formatted, ".000000000Z-NA.grb")
+    } else {
+      filename <- paste0(folder_path, "/MSG4-SEVI-MSGCLMK-0100-0100-", nearest_time_formatted, ".000000000Z-NA.grb")
+    }
+    dataset2$match[i] <- filename
+  }
+  
+}
+
+
+
+extractgrb <- function(i) {
+  filename <- dataset2$match[i]
+  #c)
+  
+  
+  # Double Check that corresponding cloud cover file exists and load it to extract the cloud status
+  if (file.exists(filename)) {
+    # Load the cloud cover grb file from the corresponding file
+    MSGCLM <- raster(filename)
+    # Adjust the grb file extent to the correct extent based on the tif control raster
+    MSGCLM_Adjusted <- projectRaster(MSGCLM, control_raster) 
+    print(filename)
+    # Extract the geometry of the current GEDI observation and draw it
+    # if shp
+    # observation_geometry <- st_geometry(dataset2[1, ])
+    # observation_points <- st_coordinates(observation_geometry)
+    # if csv
+    points_sp <- SpatialPoints(dataset2[i,c("longitude", "latitude")])
+    
+    # Extract the cloud status information for the current observation's location
+    CMA_status <- extract(MSGCLM_Adjusted, points_sp)
+  }
+  dataset2$MSGCLM[i] <-CMA_status
+  
+}
+#})
+
+
+restult <- parLapply(cl, 1:nrow(dataset2), extractgrb) %>% unlist()
+
+dataset2$MSGCLM <- restult
+dataset2$MSGCLMr <- round(restult)
+
+
+
+# write the new files with the added column on the drive
+output_file <- "C:/Users/eadrah/Desktop/MSG0Degree/LoadedGEDIpoints_Syria.csv"
+
+# Write the data frame to a new CSV file
+write.csv(dataset2, file = output_file, row.names = FALSE)
+
+
+barplot(table(dataset2$Class2020, dataset2$MSGCLMr), beside = TRUE, col = c("red", "blue"),
+        legend = rownames(table(dataset2$Class2020, dataset2$MSGCLMr)))
+count_cloudy <- sum(dataset2$MSGCLMr == 2)
+cat("Number of Cloudy observations", count_cloudy)
+count_clear <- sum(dataset2$MSGCLMr == 1)
+cat("Number of clear observations", count_clear)
+
