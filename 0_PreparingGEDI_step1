@@ -1,0 +1,196 @@
+
+//######################################################################################
+//#### Kent State University - SenslandLab - 2023 ####
+//### Esmaeel Adrah eadrah@kent.edu ###
+//######################################################################################
+
+
+
+// The code merge GEDI L2A, L2B and L4A data and add rh PCA and filter based on the following quality and set criteria
+//1- date and region
+var StartDate = '2020-01-01'
+var EndDate = '2020-12-31'
+//2- quality filteres: quality_flagL2A, quality_flagL4A, degrade_flag, sensitivity
+var quV = 1  ;  // accepted quality_flag value (0 invalid or 1 valid)
+var degrV = 0  ;//   accepted degredation threshold value
+var sensMin = 0.97  ;// minimum accepted sensitivity value
+//3- Topography; GEDI_elevation - SRTM_elevation , Slope
+//4- Outliers; min and max 
+var Hmax = 30;
+var Hmin = 0;
+//5- Filter water and urban Land cover based on ESA landcover map 
+// Later on, NDVI values are also loaded  for vegetation mask based on NDVI threshold 
+// 6- power beama and night shots are coded but not applied to give flexibility to test and apply later
+var NightShotsOnly = false;
+var FilterCoverageBeam = false;
+// 7-Filter for intersected shots and geolocation errors, apply minimum distance of 50 m between shots
+// 8-Filter to account for geolocation errors and homogeneity, do 12.5 m buffer and get only shots within unified ESA land cover after buffer
+// 9- Filter based on topohraphy
+var slopeThreshold = 15
+var ElevD_Threshold = 50 // allowed difference between SRTM DEM and GEDI detected elevation
+
+// 10- filter for the mode of the waveform, this is also not applied to give the flexibility for testing 
+var WVmode = true; // the default filter when true is N mode > 0 
+
+////############################Start##################################################
+// Function to apply essential quality filters
+var q_filter = function(im) {
+ return im.updateMask(im.select('quality_flag').eq(quV))
+          .updateMask(im.select('degrade_flag').eq(degrV))
+          .updateMask(im.select('sensitivity').gte(sensMin))
+          .updateMask(im.select('l4_quality_flag').gte(quV))
+          .updateMask(im.select('rh100').lte(Hmax))
+          .updateMask(im.select('rh90').gte(Hmin))
+          .reproject({
+  crs: proj,
+  scale:25
+});
+};
+// Function to apply date and region filters
+function Collection(collection_name) {
+  var Collec = ee.ImageCollection(collection_name)
+        .filterBounds(region)
+        .filterDate(StartDate,EndDate)
+  return Collec;
+}
+
+
+//Get main GEDI data and relevant bands/infp
+
+var namesL2A = ['beam','degrade_flag','delta_time','digital_elevation_model','digital_elevation_model_srtm',
+'num_detectedmodes','quality_flag','sensitivity','solar_azimuth','solar_elevation','shot_number_within_beam','orbit_number']
+// Loop from rh1 to rh100 and add each element to the list
+for (var i = 1; i <= 100; i++) {
+  namesL2A.push('rh' + i);}
+var L2A =Collection("LARSE/GEDI/GEDI02_A_002_MONTHLY").select(namesL2A)
+var proj = L2A.first().projection()
+proj.nominalScale().aside(print)
+var L2B  = Collection('LARSE/GEDI/GEDI02_B_002_MONTHLY').select('cover','pgap_theta','cover_z1','cover_z2','cover_z3'
+,'pai','pai_z0','pai_z1','pai_z2','pai_z3','pavd_z0','pavd_z1','pavd_z2','pavd_z3','pavd_z4')
+var L4A = Collection("LARSE/GEDI/GEDI04_A_002_MONTHLY").select(['agbd', 'agbd_pi_lower', 'agbd_pi_upper','agbd_se','l4_quality_flag'])
+
+// function to add the bands from the matched images
+var addBands = function(im) {
+  // Get the properties containing the matched image from the secondary collection
+  var PP = ee.Image(im.get('bands'));
+  
+  // Add bands
+  var updatedim = im.addBands(PP)
+  
+  return updatedim;
+};
+
+//Merge the collections
+var AllGEDIdata = ee.ImageCollection(ee.Join.saveFirst('bands')
+                     .apply({'primary': L2A,
+                     'secondary': L2B, 
+                     'condition': ee.Filter.equals({'leftField': 'system:index','rightField': 'system:index'})
+                           })).map(addBands);
+var AllGEDIdata = ee.ImageCollection(ee.Join.saveFirst('bands')
+                     .apply({'primary': AllGEDIdata,
+                     'secondary': L4A, 
+                     'condition': ee.Filter.equals({'leftField': 'system:index','rightField': 'system:index'})
+                           })).map(addBands);
+
+
+var AllGEDIdata = AllGEDIdata.map(q_filter).mosaic()
+
+
+//  Get Elevation attributes from SRTM 30m
+var DEM = ee.Image('USGS/SRTMGL1_003').rename('DEM');
+
+ // Importing module https://github.com/zecojls/tagee
+var TAGEE = require('users/joselucassafanelli/TAGEE:TAGEE-functions');
+  // Smoothing filter
+var gaussianFilter = ee.Kernel.gaussian({
+  radius: 3, sigma: 2, units: 'pixels', normalize: true
+});
+// Smoothing the DEM with the gaussian kernel.
+var DEM = DEM.convolve(gaussianFilter).resample("bilinear");
+var DEMAttributes = TAGEE.terrainAnalysis(TAGEE, DEM, region);
+
+DEMAttributes = DEMAttributes.select("Elevation", "Slope").updateMask(AllGEDIdata.select('digital_elevation_model'))
+var elevFilter = AllGEDIdata.select('digital_elevation_model').subtract(DEMAttributes.select('Elevation')).abs().lte(ElevD_Threshold)
+
+var AllGEDIdata = AllGEDIdata.updateMask(elevFilter).updateMask(DEMAttributes.select('Slope').lte(slopeThreshold)).reproject({
+  crs: proj,
+  scale:25
+});
+
+
+
+// Get landcover 2020 ESA/WorldCover/v100
+var WC_ESA = ee.ImageCollection("ESA/WorldCover/v100").first().clip(region);
+// filter urban area and water 
+var UrbanMask = WC_ESA.neq(50)
+var WaterMask = WC_ESA.neq(80)
+var AllGEDIdata =  AllGEDIdata.updateMask(UrbanMask).updateMask(WaterMask).reproject({
+  crs: proj,
+  scale:25
+});
+
+
+
+//Setting night shots and power beams filter 
+if (NightShotsOnly === true) {
+var AllGEDIdata = AllGEDIdata.map(function(im) {
+  return im.updateMask(im.select('solar_elevation').lte(0))})
+}
+
+if (FilterCoverageBeam === true) {
+var AllGEDIdata = AllGEDIdata.map(function(im) {
+  return im.updateMask(im.select('beam').gt(4))})
+}
+
+
+// N mode filter
+if (WVmode === true) {
+var AllGEDIdata = AllGEDIdata.map(function(im) {
+  return im.updateMask(im.select('num_detectedmodes').gt(0))})
+}
+
+
+
+//Load masked coordinates to the collection
+var lonImg = ee.Image.pixelLonLat().select('longitude').updateMask(AllGEDIdata.select('rh95'))
+var latImg = ee.Image.pixelLonLat().select('latitude').updateMask(AllGEDIdata.select('rh95'))
+// Adjust the scale for specific bands to avoid int16 max value
+var A = AllGEDIdata.select(['delta_time']).multiply(1000000)
+var B = AllGEDIdata.select(['shot_number_within_beam','orbit_number']).multiply(10000).toInt()
+var names = AllGEDIdata.bandNames().remove('shot_number_within_beam').remove('orbit_number').remove('delta_time')
+var AllGEDIdata = AllGEDIdata.select(names).addBands(latImg).addBands(lonImg).multiply(1000000).toInt()
+var AllGEDIdata = AllGEDIdata.addBands(A).addBands(B)
+Map.addLayer(AllGEDIdata)
+//# visulization of GEDI
+var palette =['FFFFFF', 'CE7E45', 'FCD163', '66A000', '207401',
+             '056201', '004C00', '023B01', '012E01', '011301'];
+var Vis = {min: 0,max: 20000000, palette: palette};//: 'darkblue,red,orange,green,darkgreen',};
+Map.addLayer(AllGEDIdata.select('rh100'),Vis)
+
+
+var rhnames = []
+for (var i = 1; i <= 100; i++) {
+  rhnames.push('rh' + i);}
+var pca = PCA(AllGEDIdata.select(rhnames))
+
+// Extract the properties of the pca image
+var variance = pca.toDictionary()
+print('Variance of Principal Components', variance)
+
+
+var AllGEDIdata = AllGEDIdata.addBands(pca.select(['pc1', 'pc2', 'pc3','pc4','pc5']).multiply(1000000).toInt())
+
+Map.addLayer(AllGEDIdata)
+////###############EXPORT the raster at this stage to facilitate the computing############################
+
+
+ Export.image.toAsset(
+   {
+      image: AllGEDIdata,
+      region: region.geometry(),
+      description: 'GEDIFull_Syria2020',
+      scale: 25,
+      crs: 'EPSG:32637',
+      maxPixels: 1e13})
+      
+////##################################################################################################
